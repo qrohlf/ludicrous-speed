@@ -6,6 +6,7 @@ require 'filesize'
 require 'uri'
 require './chunk'
 
+
 # usage: ./ludicrousspeed.rb user:pass@domain.com /path/to/file
 
 uri = URI.parse('sftp://' + ARGV[0])
@@ -14,8 +15,13 @@ uri = URI.parse('sftp://' + ARGV[0])
 @host = uri.host
 @file_remote_path = ARGV[1]
 @file_local_path = File.basename(@file_remote_path)
-@chunk_count=30
-@worker_count=15
+@chunk_count=5
+@worker_count=5
+
+if File.exists? @file_local_path
+  puts "File exists - aborting!".yellow
+  exit
+end
 
 puts "Logging in...".cyan
 
@@ -27,7 +33,7 @@ Net::SFTP.start(@host, @user, password: @pass) do |sftp|
   end
 end
 
-puts "File is #{Filesize.from(@bytes.to_s+" B").pretty}"
+puts "File is #{@bytes}B (#{Filesize.from(@bytes.to_s+" B").pretty})"
 @chunksize=(@bytes/@chunk_count).ceil
 puts "Downloading in #{@chunk_count} chunks using #{@worker_count} workers. Chunk size is #{Filesize.from(@chunksize.to_s+" B").pretty}"
 
@@ -42,26 +48,32 @@ while(pos < @bytes) do
   )
   pos += chunk.size
   @chunks << chunk
+  puts "#{chunk.offset} - #{chunk.offset + chunk.size}"
 end
 
-@chunks.each do |c|
-  puts "#{c.offset} - #{c.offset + c.size}"
-end
+@download_queue = @chunks.clone
 
 # Spin up some worker threads
 @workers = []
-@worker_count.times do
-  @workers << Thread.new do
-    puts "Worker started!"
+@worker_count.times do |i|
+  @workers << Thread.new(i) do |index|
+    puts "Worker #{index} started!"
     Net::SFTP.start(@host, @user, password: @pass) do |sftp|
-      while @chunks.size > 0
-        c = @chunks.shift
+      puts "Worker #{index} logged in!".green
+      while @download_queue.size > 0
+        c = @download_queue.shift
         c.download!(sftp)
-        c.merge!
       end
     end
-    puts "Worker finished!"
+    puts "Worker #{index} finished!"
   end
+end
+
+# Combine the results on the main thread in order as they finish downloading
+@chunks.each do |c|
+  c.wait
+  puts "chunk count is #{@chunks.size}"
+  c.merge!
 end
 
 #wait for workers to finish
